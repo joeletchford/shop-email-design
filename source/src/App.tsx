@@ -4,7 +4,7 @@ import {
 } from '@shopify/polaris';
 import { EditIcon, ComposeIcon, CollectionIcon, AppsIcon } from '@shopify/polaris-icons';
 
-import { getCurrentIdentity, isAdmin, loadTokens, loadComponents, saveTokens, saveComponent, deleteComponent } from './quick';
+import { getCurrentIdentity, isAdmin, loadTokens, loadComponents, saveTokens, saveComponent, deleteComponent, resetToDefaults } from './quick';
 import { SEED_TOKENS, SEED_COMPONENTS } from './seed';
 import type { Tokens, ComponentDef, TokenFontSize } from './types';
 import { TokensPage } from './pages/TokensPage';
@@ -335,6 +335,10 @@ function MainApp({ draftId }: { draftId: string | null }) {
         identity={identity}
         isAdmin={admin}
         onNavigate={(r) => setRoute(r)}
+        onReset={async () => {
+          await resetToDefaults(SEED_TOKENS, SEED_COMPONENTS);
+          await reload();
+        }}
       />
     );
   }

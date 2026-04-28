@@ -114,6 +114,50 @@ function NavItem({ label, active, onClick }: { label: string; active: boolean; o
   );
 }
 
+// ─── ResetButton ─────────────────────────────────────────────────────────────
+
+function ResetButton({ onReset }: { onReset: () => Promise<void> }) {
+  const [state, setState] = useState<'idle' | 'confirm' | 'running'>('idle');
+  const run = async () => {
+    setState('running');
+    try { await onReset(); } finally { setState('idle'); }
+  };
+  if (state === 'confirm') {
+    return (
+      <div style={{ padding: '6px 8px 6px 24px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <span style={{ fontFamily: FONT, fontSize: 11, color: '#B91C1C', lineHeight: 1.4 }}>
+          Wipes all components and re-seeds from the canonical seed. Can't undo.
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button onClick={run} style={{ flex: 1, padding: '5px 0', background: '#B91C1C', border: 'none', borderRadius: 6, color: '#fff', fontFamily: FONT, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
+            Confirm reset
+          </button>
+          <button onClick={() => setState('idle')} style={{ flex: 1, padding: '5px 0', background: 'transparent', border: `1px solid ${BORDER}`, borderRadius: 6, color: TEXT2, fontFamily: FONT, fontSize: 11, cursor: 'pointer' }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <button
+      onClick={() => setState(state === 'running' ? 'running' : 'confirm')}
+      disabled={state === 'running'}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+        padding: '8px 8px', borderRadius: 8, border: 'none',
+        background: 'transparent', cursor: state === 'running' ? 'wait' : 'pointer',
+        textAlign: 'left',
+      }}
+    >
+      <ChevronRight size={12} color="rgba(185,28,28,0.5)" />
+      <span style={{ fontFamily: FONT, fontSize: 14, fontWeight: 400, letterSpacing: '-0.2px', color: '#B91C1C', lineHeight: '20px' }}>
+        {state === 'running' ? 'Resetting…' : 'Reset to defaults'}
+      </span>
+    </button>
+  );
+}
+
 // ─── ParamField ───────────────────────────────────────────────────────────────
 
 function ParamField({ param, value, tokens, onChange }: {
@@ -449,12 +493,13 @@ function ComponentSection({ item, tokens, components, isExpanded, onToggleExpand
 
 // ─── SystemPage ───────────────────────────────────────────────────────────────
 
-export function SystemPage({ tokens, components, isAdmin, onNavigate }: {
+export function SystemPage({ tokens, components, isAdmin, onNavigate, onReset }: {
   tokens: Tokens;
   components: ComponentDef[];
   identity?: { email: string; name?: string } | null;
   isAdmin: boolean;
   onNavigate: (route: 'emails' | 'tokens' | 'catalog') => void;
+  onReset?: () => Promise<void>;
 }) {
   const [query, setQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
@@ -643,6 +688,7 @@ export function SystemPage({ tokens, components, isAdmin, onNavigate }: {
                 <NavItem label="Email Composer" active={false} onClick={() => onNavigate('emails')} />
                 <NavItem label="Tokens" active={false} onClick={() => onNavigate('tokens')} />
                 <NavItem label="Catalog" active={false} onClick={() => onNavigate('catalog')} />
+                {onReset && <ResetButton onReset={onReset} />}
               </div>
             </div>
           </div>
