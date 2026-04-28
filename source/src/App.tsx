@@ -231,6 +231,8 @@ function MainApp({ draftId }: { draftId: string | null }) {
         if (missing.length > 0 || stale.length > 0 || obsolete.length > 0) {
           c = await loadComponents();
         }
+        // Always filter to seed IDs — guards against delete() failing silently.
+        c = c.filter((cur) => seedById.has(cur.id));
       }
       setComponents(c);
       setError(null);

@@ -70,6 +70,7 @@ export async function getCurrentIdentity(): Promise<{ email: string; name?: stri
 }
 
 export async function isAdmin(): Promise<boolean> {
+  if (!import.meta.env.DEV) return false;
   const id = await getCurrentIdentity();
   const email = id?.email?.toLowerCase();
   const ok = !!email && ADMIN_EMAILS.map((e) => e.toLowerCase()).includes(email);
