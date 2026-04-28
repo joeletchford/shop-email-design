@@ -5,6 +5,7 @@ import {
 
 import { renderEmail } from '../render';
 import type { Tokens, ComponentDef, BlockInstance } from '../types';
+import { type InboxClient, OpenEmailChrome } from '../EmailClientChrome';
 
 type DeviceKey = 'mobile' | 'tablet' | 'desktop';
 type ColorScheme = 'light' | 'dark';
@@ -22,6 +23,8 @@ type PreviewPayload = {
   blocks: BlockInstance[];
   components: ComponentDef[];
   tokens: Tokens;
+  subject?: string;
+  preheader?: string;
 };
 
 export const PREVIEW_STORAGE_KEY = 'shop-email-design.preview.v1';
@@ -31,6 +34,7 @@ export function PreviewPage() {
   const [payload, setPayload] = useState<PreviewPayload | null>(null);
   const [activeDevices, setActiveDevices] = useState<DeviceKey[]>(['desktop', 'mobile']);
   const [scheme, setScheme] = useState<ColorScheme>('light');
+  const [client, setClient] = useState<InboxClient>('gmail');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -113,6 +117,10 @@ export function PreviewPage() {
               <Button pressed={scheme === 'light'} onClick={() => setScheme('light')}>Light surround</Button>
               <Button pressed={scheme === 'dark'} onClick={() => setScheme('dark')}>Dark surround</Button>
             </ButtonGroup>
+            <ButtonGroup variant="segmented">
+              <Button pressed={client === 'gmail'} onClick={() => setClient('gmail')}>Gmail</Button>
+              <Button pressed={client === 'apple'} onClick={() => setClient('apple')}>Apple Mail</Button>
+            </ButtonGroup>
           </InlineStack>
         </Card>
 
@@ -128,6 +136,7 @@ export function PreviewPage() {
                   <div style={{ borderBottom: `1px solid ${frameBorder}`, padding: '8px 12px', fontSize: 11, color: frameText, fontFamily: 'monospace', opacity: 0.6 }}>
                     {d.width_px}px viewport
                   </div>
+                  <OpenEmailChrome client={client} isMobile={d.key === 'mobile'} subject={payload.subject ?? ''} />
                   <iframe srcDoc={html} title={`Preview ${d.label}`} style={{ display: 'block', width: '100%', height: 800, border: 0, background: '#fff' }} />
                 </div>
               </BlockStack>

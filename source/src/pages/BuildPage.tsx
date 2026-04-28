@@ -1,28 +1,28 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
-  Button, ButtonGroup, TextField, Select, Banner, Modal, BlockStack, InlineStack, Text, Divider, Tooltip, Icon, Tag,
+  Button, ButtonGroup, TextField, Select, Banner, Modal, BlockStack, InlineStack, Text, Divider, Tooltip, Tag,
 } from '@shopify/polaris';
 import {
-  PlusIcon, DeleteIcon, ClipboardIcon, ArrowUpIcon, ArrowDownIcon, ViewIcon, UploadIcon, DesktopIcon, MobileIcon,
+  DeleteIcon, ClipboardIcon, ArrowUpIcon, ArrowDownIcon, ViewIcon, UploadIcon, DesktopIcon, MobileIcon,
 } from '@shopify/polaris-icons';
 
-import type { ComponentDef, Tokens, BlockInstance, ParamDef } from '../types';
+import type { ComponentDef, Tokens, BlockInstance, ParamDef, Draft } from '../types';
 import { renderBlock, renderEmail } from '../render';
 import { PREVIEW_STORAGE_KEY, PREVIEW_CHANNEL } from './PreviewPage';
-import { uploadImage } from '../quick';
+import { uploadImage, loadDraft as loadDraftFromDb, saveDraft as saveDraftToDb } from '../quick';
+import { type InboxClient, OpenEmailChrome, GmailRow, AppleMailRow } from '../EmailClientChrome';
 
 type Props = {
   tokens: Tokens;
   components: ComponentDef[];
   identity: { email: string; name?: string } | null;
   isAdmin?: boolean;
-  onNavigate?: (route: 'tokens' | 'catalog') => void;
+  draftId: string;
+  onGoHome: () => void;
 };
 
-const DRAFT_KEY = 'shop-email-design.draft.v1';
 const SURROUND_KEY = 'shop-email-design.surround.v1';
 
-type DraftLocal = { name: string; blocks: BlockInstance[] };
 type DeviceMode = 'desktop' | 'mobile' | 'fullscreen';
 type SurroundMode = 'light' | 'dark';
 
@@ -33,15 +33,6 @@ function saveSurround(s: SurroundMode) {
   localStorage.setItem(SURROUND_KEY, s);
 }
 
-function loadDraft(): DraftLocal {
-  try {
-    const s = localStorage.getItem(DRAFT_KEY);
-    if (!s) return { name: 'Untitled email', blocks: [] };
-    return JSON.parse(s) as DraftLocal;
-  } catch { return { name: 'Untitled email', blocks: [] }; }
-}
-function saveDraft(d: DraftLocal) { localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); }
-
 const COLORS = {
   rail_bg: '#1A1C1F', rail_text: '#E3E3E3', rail_text_muted: '#9DA0A4',
   rail_hover: '#27292D', rail_border: '#2D3036',
@@ -49,20 +40,76 @@ const COLORS = {
   canvas_bg: '#F1F2F4', inspector_bg: '#FFFFFF',
 };
 
-export function BuildPage({ tokens, components, isAdmin, onNavigate }: Props) {
-  const [draft, setDraft] = useState<DraftLocal>(loadDraft);
-  const [selectedIdx, setSelectedIdx] = useState<number | null>(draft.blocks.length > 0 ? 0 : null);
+const CATEGORY_ORDER: Record<string, number> = {
+  Hero: 0, Content: 1, Product: 2, CTA: 3, Media: 4, Brand: 5, Transactional: 6, Layout: 7,
+};
+
+const CATEGORY_ACCENT: Record<string, string> = {
+  Hero: '#7B61FF',
+  Content: '#3B82F6',
+  Product: '#10B981',
+  CTA: '#F59E0B',
+  Media: '#EC4899',
+  Brand: '#EF4444',
+  Transactional: '#6B7280',
+  Layout: '#4B5563',
+};
+
+export function BuildPage({ tokens, components, identity, draftId, onGoHome }: Props) {
+  const [draft, setDraft] = useState<Draft>({
+    id: draftId, name: 'Untitled email', blocks: [], subject: '', preheader: '',
+    updated_at: new Date().toISOString(),
+  });
+  const [draftReady, setDraftReady] = useState(false);
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [device, setDevice] = useState<DeviceMode>('desktop');
   const [surround, setSurround] = useState<SurroundMode>(loadSurround);
   const [copied, setCopied] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+
+  const draftRef = useRef(draft);
+  useEffect(() => { draftRef.current = draft; }, [draft]);
 
   useEffect(() => { saveSurround(surround); }, [surround]);
 
-  useEffect(() => { saveDraft(draft); }, [draft]);
+  useEffect(() => {
+    loadDraftFromDb(draftId).then((d) => {
+      if (d) {
+        setDraft(d);
+        setSelectedIdx(d.blocks.length > 0 ? 0 : null);
+      } else {
+        setDraft((cur) => ({ ...cur, created_by: identity?.email ?? undefined }));
+      }
+      setDraftReady(true);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftId]);
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const saveNow = useCallback(async () => {
+    clearTimeout(saveTimer.current);
+    setSaveState('saving');
+    try {
+      await saveDraftToDb({ ...draftRef.current, updated_at: new Date().toISOString() });
+      setSaveState('saved');
+      setTimeout(() => setSaveState('idle'), 2000);
+    } catch (e) {
+      console.warn('[build] saveNow failed:', e);
+      setSaveState('idle');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!draftReady) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(saveNow, 1000);
+    return () => clearTimeout(saveTimer.current);
+  }, [draft, draftReady, saveNow]);
 
   // Broadcast to any open preview tab
   useEffect(() => {
-    const payload = { name: draft.name, blocks: draft.blocks, components, tokens };
+    const payload = { name: draft.name, blocks: draft.blocks, components, tokens, subject: draft.subject, preheader: draft.preheader };
     try { sessionStorage.setItem(PREVIEW_STORAGE_KEY, JSON.stringify(payload)); } catch {}
     let channel: BroadcastChannel | null = null;
     try { channel = new BroadcastChannel(PREVIEW_CHANNEL); channel.postMessage(payload); } catch {}
@@ -88,7 +135,11 @@ export function BuildPage({ tokens, components, isAdmin, onNavigate }: Props) {
       if (!map.has(c.category)) map.set(c.category, []);
       map.get(c.category)!.push(c);
     }
-    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+    return Array.from(map.entries()).sort(([a], [b]) => {
+      const oa = CATEGORY_ORDER[a] ?? 99;
+      const ob = CATEGORY_ORDER[b] ?? 99;
+      return oa !== ob ? oa - ob : a.localeCompare(b);
+    });
   }, [components]);
 
   const addBlock = (component: ComponentDef, paramOverrides?: Record<string, unknown>) => {
@@ -142,12 +193,6 @@ export function BuildPage({ tokens, components, isAdmin, onNavigate }: Props) {
     try { await navigator.clipboard.writeText(text); setCopied(label); setTimeout(() => setCopied(null), 2000); } catch {}
   };
   const openPreview = () => window.open(`${window.location.pathname}?view=preview`, 'shop-email-preview');
-  const newDraft = () => {
-    if (draft.blocks.length === 0 || confirm('Start a new email?')) {
-      setDraft({ name: 'Untitled email', blocks: [] });
-      setSelectedIdx(null);
-    }
-  };
 
   return (
     <div style={{
@@ -166,13 +211,19 @@ export function BuildPage({ tokens, components, isAdmin, onNavigate }: Props) {
         blockCount={draft.blocks.length}
         copied={copied}
         onCopy={() => copyToClipboard(html, 'html')}
-        onPreview={openPreview} onNewDraft={newDraft}
+        onPreview={openPreview}
         previewDisabled={draft.blocks.length === 0}
-        isAdmin={isAdmin} onNavigate={onNavigate}
+        onGoHome={onGoHome}
+        saveState={saveState}
+        onSave={saveNow}
       />
       <LeftRail byCategory={byCategory} onAdd={addBlock} components={components} tokens={tokens} />
       <Canvas device={device} surround={surround} blocks={draft.blocks} components={components} tokens={tokens}
-        selectedIdx={selectedIdx} onSelect={setSelectedIdx} onMove={moveBlock} onMoveTo={moveBlockTo} onRemove={removeBlock} />
+        selectedIdx={selectedIdx} onSelect={setSelectedIdx} onMove={moveBlock} onMoveTo={moveBlockTo} onRemove={removeBlock}
+        subject={draft.subject ?? ''} preheader={draft.preheader ?? ''}
+        onSubjectChange={(v) => setDraft({ ...draft, subject: v })}
+        onPreheaderChange={(v) => setDraft({ ...draft, preheader: v })}
+      />
       <RightRail
         selectedBlock={selected}
         selectedComponent={selectedComponent}
@@ -185,21 +236,39 @@ export function BuildPage({ tokens, components, isAdmin, onNavigate }: Props) {
 
 function Toolbar({
   emailName, onEmailNameChange, device, onDeviceChange, surround, onSurroundChange, blockCount, copied,
-  onCopy, onPreview, onNewDraft, previewDisabled, isAdmin, onNavigate,
+  onCopy, onPreview, previewDisabled, onGoHome, saveState, onSave,
 }: {
   emailName: string; onEmailNameChange: (v: string) => void;
   device: DeviceMode; onDeviceChange: (d: DeviceMode) => void;
   surround: SurroundMode; onSurroundChange: (s: SurroundMode) => void;
   blockCount: number; copied: string | null;
-  onCopy: () => void; onPreview: () => void; onNewDraft: () => void;
+  onCopy: () => void; onPreview: () => void;
   previewDisabled: boolean;
-  isAdmin?: boolean; onNavigate?: (route: 'tokens' | 'catalog') => void;
+  onGoHome: () => void;
+  saveState: 'idle' | 'saving' | 'saved';
+  onSave: () => void;
 }) {
   return (
     <div style={{
       gridArea: 'toolbar', background: COLORS.toolbar_bg, borderBottom: `1px solid ${COLORS.toolbar_border}`,
-      display: 'flex', alignItems: 'center', gap: 16, padding: '0 16px',
+      display: 'flex', alignItems: 'center', gap: 12, padding: '0 16px',
     }}>
+      <button
+        onClick={onGoHome}
+        title="Back to home"
+        aria-label="Back to home"
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 32, height: 32, borderRadius: 6, flexShrink: 0,
+          background: 'transparent', border: 0, cursor: 'pointer',
+          color: '#6D7175', fontSize: 18,
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = '#F6F6F7')}
+        onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+      >
+        ←
+      </button>
+
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
         <div style={{ minWidth: 0, flex: 1, maxWidth: 360 }}>
           <input type="text" value={emailName} onChange={(e) => onEmailNameChange(e.target.value)} placeholder="Untitled email"
@@ -208,14 +277,6 @@ function Toolbar({
             onBlur={(e) => (e.target.style.background = 'transparent')} />
         </div>
         <Text as="span" variant="bodySm" tone="subdued">{blockCount} block{blockCount === 1 ? '' : 's'}</Text>
-        {isAdmin && onNavigate && (
-          <div style={{ marginLeft: 12 }}>
-            <ButtonGroup variant="segmented">
-              <Button onClick={() => onNavigate('tokens')} variant="tertiary">Tokens</Button>
-              <Button onClick={() => onNavigate('catalog')} variant="tertiary">Catalog</Button>
-            </ButtonGroup>
-          </div>
-        )}
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto', gap: 8 }}>
@@ -231,8 +292,15 @@ function Toolbar({
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', flex: 1 }}>
-        <Button onClick={onNewDraft} variant="tertiary">New</Button>
         <Button icon={ViewIcon} onClick={onPreview} disabled={previewDisabled}>Open preview</Button>
+        <Button
+          onClick={onSave}
+          loading={saveState === 'saving'}
+          disabled={saveState === 'saving'}
+          tone={saveState === 'saved' ? 'success' : undefined}
+        >
+          {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved ✓' : 'Save'}
+        </Button>
         <Button icon={ClipboardIcon} variant="primary" onClick={onCopy}>
           {copied === 'html' ? 'Copied ✓' : 'Copy HTML'}
         </Button>
@@ -246,8 +314,10 @@ const LEFT_RAIL_COLLAPSED_KEY = 'shop-email-design.left-rail-collapsed.v1';
 function loadCollapsedCategories(): Record<string, boolean> {
   try {
     const raw = localStorage.getItem(LEFT_RAIL_COLLAPSED_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  // Smart defaults: utility/infrequent categories start collapsed
+  return { Brand: true, Transactional: true, Layout: true };
 }
 function saveCollapsedCategories(state: Record<string, boolean>) {
   localStorage.setItem(LEFT_RAIL_COLLAPSED_KEY, JSON.stringify(state));
@@ -265,91 +335,155 @@ function LeftRail({
   tokens: Tokens;
 }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsedCategories);
+  const [search, setSearch] = useState('');
   useEffect(() => { saveCollapsedCategories(collapsed); }, [collapsed]);
 
-  const toggleCategory = (cat: string) => {
-    setCollapsed((prev) => ({ ...prev, [cat]: !prev[cat] }));
-  };
+  const toggleCategory = (cat: string) => setCollapsed((prev) => ({ ...prev, [cat]: !prev[cat] }));
 
-  const expandAll = () => setCollapsed({});
-  const collapseAll = () => {
-    const next: Record<string, boolean> = {};
-    for (const [cat] of byCategory) next[cat] = true;
-    setCollapsed(next);
-  };
+  const q = search.trim().toLowerCase();
+  const filtered: [string, ComponentDef[]][] = q
+    ? byCategory
+        .map(([cat, list]): [string, ComponentDef[]] => [
+          cat,
+          list.filter((c) =>
+            c.name.toLowerCase().includes(q) ||
+            c.presets?.some((p) => p.name.toLowerCase().includes(q))
+          ),
+        ])
+        .filter(([, list]) => list.length > 0)
+    : byCategory;
 
-  const allCollapsed = byCategory.every(([cat]) => collapsed[cat]);
+  const totalCount = filtered.reduce(
+    (acc, [, list]) => acc + list.reduce((a, c) => a + (c.presets?.length ?? 1), 0),
+    0
+  );
 
   return (
-    <div style={{ gridArea: 'left', background: COLORS.rail_bg, color: COLORS.rail_text, borderRight: `1px solid ${COLORS.rail_border}`, overflowY: 'auto' }}>
-      <div style={{ padding: '20px 20px 12px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.rail_text_muted, fontWeight: 600 }}>Sections</div>
-          <button
-            onClick={allCollapsed ? expandAll : collapseAll}
-            style={{ fontSize: 11, color: COLORS.rail_text_muted, background: 'transparent', border: 0, cursor: 'pointer', fontFamily: 'inherit', padding: 2 }}
-            title={allCollapsed ? 'Expand all' : 'Collapse all'}
-          >
-            {allCollapsed ? 'Expand all' : 'Collapse all'}
-          </button>
+    <div style={{ gridArea: 'left', background: COLORS.rail_bg, color: COLORS.rail_text, borderRight: `1px solid ${COLORS.rail_border}`, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+      {/* Header + search */}
+      <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${COLORS.rail_border}`, flexShrink: 0 }}>
+        <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 1.2, color: COLORS.rail_text_muted, fontWeight: 700, marginBottom: 10 }}>
+          Sections
         </div>
-        <div style={{ fontSize: 13, color: COLORS.rail_text_muted, marginTop: 4 }}>Click a card to add it to your email</div>
-      </div>
-      {byCategory.map(([category, list]) => {
-        const isCollapsed = !!collapsed[category];
-        return (
-          <div key={category} style={{ padding: '4px 12px 12px' }}>
+        <div style={{ position: 'relative' }}>
+          <input
+            type="text"
+            placeholder="Search blocks…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              padding: '7px 28px 7px 10px',
+              background: 'rgba(255,255,255,0.07)',
+              border: `1px solid ${q ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.08)'}`,
+              borderRadius: 8, color: COLORS.rail_text, fontSize: 12,
+              outline: 'none', fontFamily: 'inherit', transition: 'border-color 0.15s',
+            }}
+            onFocus={(e) => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.25)'; }}
+            onBlur={(e) => { e.currentTarget.style.borderColor = q ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.08)'; }}
+          />
+          {q && (
             <button
-              onClick={() => toggleCategory(category)}
+              onClick={() => setSearch('')}
               style={{
-                width: '100%',
-                display: 'flex', alignItems: 'center', gap: 6,
-                padding: '8px 8px 6px',
-                background: 'transparent', border: 0,
-                cursor: 'pointer', fontFamily: 'inherit',
-                color: COLORS.rail_text_muted,
-                fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600,
+                position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+                background: 'transparent', border: 0, cursor: 'pointer',
+                color: COLORS.rail_text_muted, fontSize: 16, lineHeight: 1, padding: 0,
               }}
-              aria-expanded={!isCollapsed}
-              aria-label={`${isCollapsed ? 'Expand' : 'Collapse'} ${category}`}
-            >
-              <span style={{ fontSize: 10, transition: 'transform 0.12s', transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }}>▾</span>
-              <span style={{ flex: 1, textAlign: 'left' }}>{category}</span>
-              <span style={{ fontWeight: 400, opacity: 0.6 }}>{list.length}</span>
-            </button>
-            {!isCollapsed && list.flatMap((c) => {
-              // If a component declares presets, show one card per preset
-              // instead of a single card for the base component. The preset's
-              // param_overrides are passed to addBlock so the dropped block
-              // already has the right variant set.
-              if (c.presets && c.presets.length > 0) {
-                return c.presets.map((preset) => (
-                  <ComponentThumb
-                    key={`${c.id}/${preset.id}`}
-                    component={c}
-                    presetOverrides={preset.param_overrides}
-                    presetName={preset.name}
-                    presetDescription={preset.description}
-                    components={components}
-                    tokens={tokens}
-                    onAdd={() => onAdd(c, preset.param_overrides)}
-                  />
-                ));
-              }
-              return [
-                <ComponentThumb key={c.id} component={c} components={components} tokens={tokens} onAdd={() => onAdd(c)} />,
-              ];
-            })}
+            >×</button>
+          )}
+        </div>
+        {q && (
+          <div style={{ marginTop: 6, fontSize: 11, color: COLORS.rail_text_muted }}>
+            {totalCount === 0 ? 'No matches' : `${totalCount} block${totalCount === 1 ? '' : 's'}`}
           </div>
-        );
-      })}
+        )}
+      </div>
+
+      {/* Category list */}
+      <div style={{ flex: 1, paddingBottom: 16 }}>
+        {filtered.map(([category, list]) => {
+          const isCollapsed = !q && !!collapsed[category];
+          const accent = CATEGORY_ACCENT[category] ?? '#6D7175';
+          const blockCount = list.reduce((a, c) => a + (c.presets?.length ?? 1), 0);
+
+          return (
+            <div key={category}>
+              <button
+                onClick={() => !q && toggleCategory(category)}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '10px 14px 8px',
+                  background: 'transparent', border: 0,
+                  cursor: q ? 'default' : 'pointer',
+                  fontFamily: 'inherit', color: COLORS.rail_text_muted, textAlign: 'left',
+                }}
+                aria-expanded={!isCollapsed}
+              >
+                <span style={{ width: 7, height: 7, borderRadius: 2, flexShrink: 0, background: accent, display: 'block' }} />
+                <span style={{ flex: 1, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, fontWeight: 700 }}>
+                  {category}
+                </span>
+                <span style={{
+                  fontSize: 10, fontWeight: 600,
+                  background: 'rgba(255,255,255,0.08)', color: COLORS.rail_text_muted,
+                  padding: '1px 5px', borderRadius: 4, lineHeight: '16px',
+                }}>
+                  {blockCount}
+                </span>
+                {!q && (
+                  <span style={{
+                    fontSize: 9, color: COLORS.rail_text_muted,
+                    transition: 'transform 0.12s',
+                    transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+                    display: 'inline-block',
+                  }}>▾</span>
+                )}
+              </button>
+
+              {!isCollapsed && (
+                <div style={{ padding: '0 10px 6px' }}>
+                  {list.flatMap((c) => {
+                    if (c.presets && c.presets.length > 0) {
+                      const visiblePresets = q
+                        ? c.presets.filter((p) =>
+                            p.name.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+                        : c.presets;
+                      return visiblePresets.map((preset) => (
+                        <ComponentThumb
+                          key={`${c.id}/${preset.id}`}
+                          component={c}
+                          presetOverrides={preset.param_overrides}
+                          presetName={preset.name}
+                          presetDescription={preset.description}
+                          components={components}
+                          tokens={tokens}
+                          onAdd={() => onAdd(c, preset.param_overrides)}
+                          accent={accent}
+                        />
+                      ));
+                    }
+                    return [
+                      <ComponentThumb
+                        key={c.id}
+                        component={c}
+                        components={components}
+                        tokens={tokens}
+                        onAdd={() => onAdd(c)}
+                        accent={accent}
+                      />,
+                    ];
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-// Renders a small, scaled preview of the component at its default params and
-// makes the whole card a click-to-add target. For section-start/end and other
-// components that emit non-rendering HTML, fall back to a label-only card.
 function ComponentThumb({
   component,
   presetOverrides,
@@ -358,6 +492,7 @@ function ComponentThumb({
   components,
   tokens,
   onAdd,
+  accent,
 }: {
   component: ComponentDef;
   presetOverrides?: Record<string, unknown>;
@@ -366,6 +501,7 @@ function ComponentThumb({
   components: ComponentDef[];
   tokens: Tokens;
   onAdd: () => void;
+  accent?: string;
 }) {
   const previewHtml = useMemo(() => {
     if (component.id === 'section-start' || component.id === 'section-end') return null;
@@ -397,21 +533,28 @@ function ComponentThumb({
         textAlign: 'left',
         overflow: 'hidden',
         display: 'block',
-        transition: 'border-color 0.1s',
+        transition: 'border-color 0.12s, box-shadow 0.12s',
+        position: 'relative',
       }}
-      onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#5433EB'; }}
-      onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'transparent'; }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = accent ?? '#5433EB';
+        e.currentTarget.style.boxShadow = `0 0 0 1px ${accent ?? '#5433EB'}33`;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = 'transparent';
+        e.currentTarget.style.boxShadow = 'none';
+      }}
     >
+      {/* Category accent stripe on left edge */}
+      {accent && (
+        <div style={{
+          position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,
+          background: accent,
+        }} />
+      )}
+
       {previewHtml ? (
-        <div
-          style={{
-            background: '#FFFFFF',
-            height: 88,
-            overflow: 'hidden',
-            position: 'relative',
-          }}
-        >
-          {/* Scale the component down so the 600px-wide email block fits ~280px of rail */}
+        <div style={{ background: '#FFFFFF', height: 110, overflow: 'hidden', position: 'relative' }}>
           <div
             style={{
               transform: 'scale(0.45)',
@@ -421,49 +564,48 @@ function ComponentThumb({
             }}
             dangerouslySetInnerHTML={{ __html: previewHtml }}
           />
-          {/* fade-out at bottom so clipped previews look intentional */}
           <div style={{
-            position: 'absolute', left: 0, right: 0, bottom: 0, height: 24,
+            position: 'absolute', left: 0, right: 0, bottom: 0, height: 32,
             background: 'linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,1))',
           }} />
         </div>
       ) : (
-        <div
-          style={{
-            height: 64,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'rgba(84,51,235,0.15)',
-            color: '#B5A3FF',
-            fontSize: 11,
-            fontWeight: 600,
-            textTransform: 'uppercase',
-            letterSpacing: 0.5,
-            border: '1px dashed rgba(84,51,235,0.5)',
-            borderRadius: 6,
-            margin: 6,
-          }}
-        >
-          {component.id === 'section-start' ? '▼ Section opens' :
-           component.id === 'section-end'   ? '▲ Section closes' :
+        <div style={{
+          height: 80,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: accent ? `${accent}18` : 'rgba(84,51,235,0.12)',
+          color: accent ?? '#B5A3FF',
+          fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8,
+          borderRadius: '7px 7px 0 0',
+        }}>
+          {component.id === 'section-start' ? '▼ opens' :
+           component.id === 'section-end'   ? '▲ closes' :
            component.name}
         </div>
       )}
-      <div style={{ padding: '6px 10px 8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+
+      <div style={{ padding: '6px 10px 7px 13px', display: 'flex', alignItems: 'center', gap: 6 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayName}</div>
+          <div style={{
+            fontSize: 12, fontWeight: 500,
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            color: COLORS.rail_text, lineHeight: 1.3,
+          }}>
+            {displayName}
+          </div>
           {presetDescription && (
-            <div style={{ fontSize: 10, color: COLORS.rail_text_muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{presetDescription}</div>
+            <div style={{ fontSize: 10, color: COLORS.rail_text_muted, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {presetDescription}
+            </div>
           )}
         </div>
-        <Icon source={PlusIcon} tone="subdued" />
+        <span style={{ fontSize: 14, color: COLORS.rail_text_muted, flexShrink: 0, lineHeight: 1, opacity: 0.5 }}>+</span>
       </div>
     </button>
   );
 }
 
-function Canvas({ device, surround, blocks, components, tokens, selectedIdx, onSelect, onMove, onMoveTo, onRemove }: {
+function Canvas({ device, surround, blocks, components, tokens, selectedIdx, onSelect, onMove, onMoveTo, onRemove, subject, preheader, onSubjectChange, onPreheaderChange }: {
   device: DeviceMode; surround: SurroundMode;
   blocks: BlockInstance[]; components: ComponentDef[]; tokens: Tokens;
   selectedIdx: number | null;
@@ -471,6 +613,8 @@ function Canvas({ device, surround, blocks, components, tokens, selectedIdx, onS
   onMove: (i: number, dir: -1 | 1) => void;
   onMoveTo: (from: number, to: number) => void;
   onRemove: (i: number) => void;
+  subject: string; preheader: string;
+  onSubjectChange: (v: string) => void; onPreheaderChange: (v: string) => void;
 }) {
   // All three modes (Desktop / Mobile / Fullscreen) now share the same DOM
   // rendering so drag-and-drop works everywhere. The only difference is the
@@ -479,6 +623,7 @@ function Canvas({ device, surround, blocks, components, tokens, selectedIdx, onS
   // Mobile picks the responsive-spacing-token mobile values inline so the
   // preview reflects mobile padding/radius even though the parent browser
   // viewport is wider than the @media breakpoint.
+  const [client, setClient] = useState<InboxClient>('gmail');
   const viewport = device === 'mobile' ? 'mobile' : 'desktop';
   const frameWidth = device === 'mobile' ? 400 : 720;
   const frameLabel = device === 'mobile' ? 'Mobile · 400px' : device === 'fullscreen' ? 'Edit · 720px' : 'Desktop · 720px';
@@ -486,30 +631,69 @@ function Canvas({ device, surround, blocks, components, tokens, selectedIdx, onS
 
   return (
     <div style={{ gridArea: 'canvas', background: surroundBg, overflow: 'auto', display: 'flex', justifyContent: 'center', padding: 32 }}>
-      <div style={{ width: frameWidth, background: '#fff', borderRadius: 12, boxShadow: '0 1px 0 rgba(0,0,0,0.05), 0 8px 32px rgba(0,0,0,0.08)', overflow: 'hidden', alignSelf: 'flex-start' }}>
-        <div style={{ borderBottom: '1px solid #E5E5E5', padding: '6px 12px', fontSize: 11, fontFamily: 'monospace', color: '#6D7175', background: '#FAFBFB' }}>
-          {frameLabel} · click + drag blocks to reorder
+      <div style={{ width: frameWidth, display: 'flex', flexDirection: 'column', gap: 16, alignSelf: 'flex-start' }}>
+        <InboxPreview subject={subject} preheader={preheader} client={client} onClientChange={setClient} onSubjectChange={onSubjectChange} onPreheaderChange={onPreheaderChange} />
+        <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 0 rgba(0,0,0,0.05), 0 8px 32px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
+          <div style={{ borderBottom: '1px solid #E5E5E5', padding: '6px 12px', fontSize: 11, fontFamily: 'monospace', color: '#6D7175', background: '#FAFBFB' }}>
+            {frameLabel} · click + drag blocks to reorder
+          </div>
+          <OpenEmailChrome client={client} isMobile={device === 'mobile'} subject={subject} />
+          <div style={{ padding: 16 }}>
+            {blocks.length === 0 ? (
+              <div style={{ padding: 64, textAlign: 'center', color: '#6D7175' }}>
+                <p style={{ fontSize: 14, marginBottom: 4 }}>Start composing</p>
+                <p style={{ fontSize: 13 }}>Pick a section from the left to add your first block.</p>
+              </div>
+            ) : (
+              <BlockListWithDnd
+                blocks={blocks}
+                components={components}
+                tokens={tokens}
+                viewport={viewport}
+                selectedIdx={selectedIdx}
+                onSelect={onSelect}
+                onMove={onMove}
+                onMoveTo={onMoveTo}
+                onRemove={onRemove}
+              />
+            )}
+          </div>
         </div>
-        <div style={{ padding: 16 }}>
-          {blocks.length === 0 ? (
-            <div style={{ padding: 64, textAlign: 'center', color: '#6D7175' }}>
-              <p style={{ fontSize: 14, marginBottom: 4 }}>Start composing</p>
-              <p style={{ fontSize: 13 }}>Pick a section from the left to add your first block.</p>
-            </div>
-          ) : (
-            <BlockListWithDnd
-              blocks={blocks}
-              components={components}
-              tokens={tokens}
-              viewport={viewport}
-              selectedIdx={selectedIdx}
-              onSelect={onSelect}
-              onMove={onMove}
-              onMoveTo={onMoveTo}
-              onRemove={onRemove}
-            />
-          )}
+      </div>
+    </div>
+  );
+}
+
+function InboxPreview({ subject, preheader, client, onClientChange, onSubjectChange, onPreheaderChange }: {
+  subject: string; preheader: string;
+  client: InboxClient; onClientChange: (c: InboxClient) => void;
+  onSubjectChange: (v: string) => void; onPreheaderChange: (v: string) => void;
+}) {
+  const sub = subject || 'Subject line';
+  const pre = preheader || 'Preview text';
+
+  return (
+    <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 0 rgba(0,0,0,0.05), 0 8px 32px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
+      <div style={{ borderBottom: '1px solid #E5E5E5', padding: '6px 12px', fontSize: 11, fontFamily: 'monospace', color: '#6D7175', background: '#FAFBFB', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>Inbox preview</span>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {(['gmail', 'apple'] as InboxClient[]).map((c) => (
+            <button key={c} onClick={() => onClientChange(c)} style={{ padding: '2px 8px', fontSize: 11, borderRadius: 4, border: '1px solid', borderColor: client === c ? '#5C6AC4' : '#E5E7EB', background: client === c ? '#5C6AC4' : 'transparent', color: client === c ? '#fff' : '#6D7175', cursor: 'pointer', fontFamily: 'system-ui' }}>
+              {c === 'gmail' ? 'Gmail' : 'Apple Mail'}
+            </button>
+          ))}
         </div>
+      </div>
+      {client === 'gmail' ? <GmailRow sub={sub} pre={pre} /> : <AppleMailRow sub={sub} pre={pre} />}
+      <div style={{ borderTop: '1px solid #E5E5E5', padding: '7px 12px', display: 'flex', gap: 12, background: '#FAFBFB' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+          <span style={{ fontSize: 11, color: '#6D7175', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>Subject</span>
+          <input value={subject} onChange={(e) => onSubjectChange(e.target.value)} placeholder="Subject line" style={{ flex: 1, fontSize: 12, border: '1px solid #E5E7EB', borderRadius: 4, padding: '3px 6px', outline: 'none', fontFamily: 'system-ui', background: '#fff' }} />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+          <span style={{ fontSize: 11, color: '#6D7175', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>Preheader</span>
+          <input value={preheader} onChange={(e) => onPreheaderChange(e.target.value)} placeholder="Preview text" style={{ flex: 1, fontSize: 12, border: '1px solid #E5E7EB', borderRadius: 4, padding: '3px 6px', outline: 'none', fontFamily: 'system-ui', background: '#fff' }} />
+        </label>
       </div>
     </div>
   );

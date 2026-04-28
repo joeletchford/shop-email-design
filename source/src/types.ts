@@ -113,4 +113,7 @@ export type Draft = {
   name: string;
   blocks: BlockInstance[];
   updated_at: string;
+  subject?: string;
+  preheader?: string;
+  created_by?: string;
 };

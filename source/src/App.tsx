@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import {
   Frame, Navigation, TopBar, Page, Layout, Card, Banner, Spinner, InlineStack, Text,
 } from '@shopify/polaris';
-import { EditIcon, ComposeIcon, CollectionIcon } from '@shopify/polaris-icons';
+import { EditIcon, ComposeIcon, CollectionIcon, AppsIcon } from '@shopify/polaris-icons';
 
 import { getCurrentIdentity, isAdmin, loadTokens, loadComponents, saveTokens, saveComponent } from './quick';
 import { SEED_TOKENS, SEED_COMPONENTS } from './seed';
@@ -11,17 +11,20 @@ import { TokensPage } from './pages/TokensPage';
 import { CatalogPage } from './pages/CatalogPage';
 import { BuildPage } from './pages/BuildPage';
 import { PreviewPage } from './pages/PreviewPage';
+import { HomePage } from './pages/HomePage';
+import { SystemPage } from './pages/SystemPage';
 
-type Route = 'build' | 'tokens' | 'catalog';
+type Route = 'system' | 'emails' | 'tokens' | 'catalog';
 
 export default function App() {
-  const isPreview = new URLSearchParams(window.location.search).get('view') === 'preview';
-  if (isPreview) return <PreviewPage />;
-  return <MainApp />;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('view') === 'preview') return <PreviewPage />;
+  const draftId = params.get('draft');
+  return <MainApp draftId={draftId} />;
 }
 
-function MainApp() {
-  const [route, setRoute] = useState<Route>('build');
+function MainApp({ draftId }: { draftId: string | null }) {
+  const [route, setRoute] = useState<Route>('system');
   const [identity, setIdentity] = useState<{ email: string; name?: string } | null>(null);
   const [admin, setAdmin] = useState(false);
   const [tokens, setTokens] = useState<Tokens | null>(null);
@@ -174,8 +177,8 @@ function MainApp() {
           if (!cur.template.includes('letter_spacing_px') && seed.template.includes('letter_spacing_px')) {
             return true;
           }
-          // 2. Seed has variant_styles that the stored component doesn't.
-          if (seed.variant_styles && !cur.variant_styles) return true;
+          // 2. Seed variant_styles differs from stored (catches value changes, not just presence).
+          if (JSON.stringify(seed.variant_styles ?? null) !== JSON.stringify(cur.variant_styles ?? null)) return true;
           // 3. Seed has presets that the stored component doesn't (or count differs).
           const seedPresetCount = seed.presets?.length ?? 0;
           const curPresetCount = cur.presets?.length ?? 0;
@@ -232,8 +235,9 @@ function MainApp() {
     <Navigation location={`/${route}`}>
       <Navigation.Section
         items={[
-          { label: 'Build', icon: ComposeIcon, selected: route === 'build', onClick: () => setRoute('build') },
+          { label: 'Components', icon: AppsIcon, selected: route === 'system', onClick: () => setRoute('system') },
           ...(admin ? [
+            { label: 'Emails', icon: ComposeIcon, selected: route === 'emails', onClick: () => setRoute('emails') },
             { label: 'Tokens', icon: EditIcon, selected: route === 'tokens', onClick: () => setRoute('tokens') },
             { label: 'Catalog', icon: CollectionIcon, selected: route === 'catalog', onClick: () => setRoute('catalog') },
           ] : []),
@@ -297,10 +301,23 @@ function MainApp() {
   const onTokensChange = async (next: Tokens) => { await saveTokens(next); setTokens(next); };
   const onComponentsChange = async () => { setComponents(await loadComponents()); };
 
-  // Build page is full-bleed (theme-editor pattern). Tokens + Catalog use the framed admin shell.
-  if (route === 'build') {
+  // Full-bleed pages bypass the Polaris Frame.
+  if (draftId) {
     return (
       <BuildPage
+        tokens={tokens}
+        components={components}
+        identity={identity}
+        isAdmin={admin}
+        draftId={draftId}
+        onGoHome={() => { window.location.href = window.location.pathname; }}
+      />
+    );
+  }
+
+  if (route === 'system') {
+    return (
+      <SystemPage
         tokens={tokens}
         components={components}
         identity={identity}
@@ -312,6 +329,7 @@ function MainApp() {
 
   return (
     <Frame topBar={topBar} navigation={nav}>
+      {route === 'emails' && <HomePage identity={identity} isAdmin={admin} onNavigate={(r) => setRoute(r)} />}
       {route === 'tokens' && admin && <TokensPage tokens={tokens} onChange={onTokensChange} identity={identity} />}
       {route === 'catalog' && admin && <CatalogPage components={components} onChanged={onComponentsChange} identity={identity} />}
     </Frame>

@@ -127,6 +127,11 @@ export function renderBlock(
     const missing = v === undefined || v === null || v === '';
     mergedParams[p.key] = missing ? p.default ?? '' : v;
   }
+  // Also carry through extra instance params not declared in comp.params
+  // (e.g. system params like color_variant / _mode injected by the renderer).
+  for (const [k, v] of Object.entries(instance.params)) {
+    if (!(k in mergedParams)) mergedParams[k] = v;
+  }
 
   // Apply variant_styles: for any param whose value matches a variant_styles
   // entry, fold the computed params into mergedParams. Keeps templates simple

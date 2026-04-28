@@ -5,7 +5,7 @@
 // .get() method. (Old version of this file assumed there was — that was the
 // "id.get is not a function" error.)
 
-import type { Tokens, ComponentDef } from './types';
+import type { Tokens, ComponentDef, Draft } from './types';
 
 type QuickCollection = {
   find(): Promise<any>;
@@ -161,6 +161,46 @@ export async function resetToDefaults(
   // Re-seed
   await saveTokens(seedTokens);
   for (const c of seedComponents) await saveComponent(c);
+}
+
+// ---- Drafts ---------------------------------------------------------------
+
+const DRAFTS_COLLECTION = 'drafts';
+
+export async function loadDrafts(): Promise<Draft[]> {
+  try {
+    const result = await requireQuick().db.collection(DRAFTS_COLLECTION).find();
+    const rows: Draft[] = Array.isArray(result)
+      ? (result as Draft[])
+      : ((result as any)?.items ?? []);
+    return rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  } catch (e) {
+    console.warn('[quick] loadDrafts fell through to empty:', e);
+    return [];
+  }
+}
+
+export async function loadDraft(id: string): Promise<Draft | null> {
+  try {
+    const row = await requireQuick().db.collection(DRAFTS_COLLECTION).findById(id);
+    return row ? (row as Draft) : null;
+  } catch (e) {
+    console.warn('[quick] loadDraft fell through to null:', e);
+    return null;
+  }
+}
+
+export async function saveDraft(d: Draft): Promise<void> {
+  const col = requireQuick().db.collection(DRAFTS_COLLECTION);
+  try {
+    await col.create(d);
+  } catch (e) {
+    await col.update(d.id, d, { overwrite: true });
+  }
+}
+
+export async function deleteDraft(id: string): Promise<void> {
+  await requireQuick().db.collection(DRAFTS_COLLECTION).delete(id);
 }
 
 // ---- File uploads ---------------------------------------------------------
