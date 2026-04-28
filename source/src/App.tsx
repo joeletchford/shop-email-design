@@ -4,7 +4,7 @@ import {
 } from '@shopify/polaris';
 import { EditIcon, ComposeIcon, CollectionIcon, AppsIcon } from '@shopify/polaris-icons';
 
-import { getCurrentIdentity, isAdmin, loadTokens, loadComponents, saveTokens, saveComponent } from './quick';
+import { getCurrentIdentity, isAdmin, loadTokens, loadComponents, saveTokens, saveComponent, deleteComponent } from './quick';
 import { SEED_TOKENS, SEED_COMPONENTS } from './seed';
 import type { Tokens, ComponentDef, TokenFontSize } from './types';
 import { TokensPage } from './pages/TokensPage';
@@ -216,7 +216,19 @@ function MainApp({ draftId }: { draftId: string | null }) {
             }
           }
         }
-        if (missing.length > 0 || stale.length > 0) {
+        // 3. Remove any stored components that are no longer in the seed.
+        const obsolete = c.filter((cur) => !seedById.has(cur.id));
+        if (obsolete.length > 0) {
+          for (const o of obsolete) {
+            try {
+              await deleteComponent(o.id);
+              console.info(`[seed] removed obsolete component '${o.id}'`);
+            } catch (e) {
+              console.warn(`[seed] failed to remove obsolete '${o.id}':`, e);
+            }
+          }
+        }
+        if (missing.length > 0 || stale.length > 0 || obsolete.length > 0) {
           c = await loadComponents();
         }
       }
