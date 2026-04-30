@@ -30,10 +30,10 @@ function makeInstance(compId: string, params: Record<string, unknown>): BlockIns
 }
 
 function makeDoc(html: string, dark = false): string {
-  const darkForce = dark
+  const colorScheme = dark
     ? '<meta name="color-scheme" content="dark"><style>:root{color-scheme:dark}</style>'
-    : '';
-  return `<!doctype html><html><head><meta charset="utf-8">${darkForce}<style>html,body{margin:0;padding:0;}</style></head><body>${html}</body></html>`;
+    : '<meta name="color-scheme" content="light"><style>:root{color-scheme:light}</style>';
+  return `<!doctype html><html><head><meta charset="utf-8">${colorScheme}<style>html,body{margin:0;padding:0;}</style></head><body>${html}</body></html>`;
 }
 
 type GridItem = {
@@ -222,12 +222,13 @@ function ParamField({ param, value, tokens, onChange }: {
 
 // ─── ComponentSection ─────────────────────────────────────────────────────────
 
-function ComponentSection({ item, tokens, components, isExpanded, onToggleExpand }: {
+function ComponentSection({ item, tokens, components, isExpanded, onToggleExpand, onCopy }: {
   item: GridItem;
   tokens: Tokens;
   components: ComponentDef[];
   isExpanded: boolean;
   onToggleExpand: () => void;
+  onCopy: (name: string) => void;
 }) {
   const [params, setParams] = useState<Record<string, unknown>>(() => ({
     ...defaultParams(item.comp),
@@ -291,7 +292,7 @@ function ComponentSection({ item, tokens, components, isExpanded, onToggleExpand
   }, []);
 
   const copy = async () => {
-    try { await navigator.clipboard.writeText(exportHtml); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+    try { await navigator.clipboard.writeText(exportHtml); setCopied(true); setTimeout(() => setCopied(false), 2000); onCopy(item.name); }
     catch {}
   };
 
@@ -322,14 +323,37 @@ function ComponentSection({ item, tokens, components, isExpanded, onToggleExpand
               </p>
             )}
           </div>
-          <span style={{
-            background: BG, color: TEXT3,
-            fontFamily: FONT, fontSize: 10, fontWeight: 600, letterSpacing: '0.04em',
-            padding: '2px 8px', borderRadius: 999, whiteSpace: 'nowrap', marginTop: 2, flexShrink: 0,
-            textTransform: 'uppercase',
-          }}>
-            {item.comp.category}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2, flexShrink: 0 }}>
+            <span style={{
+              background: BG, color: TEXT3,
+              fontFamily: FONT, fontSize: 10, fontWeight: 600, letterSpacing: '0.04em',
+              padding: '2px 8px', borderRadius: 999, whiteSpace: 'nowrap',
+              textTransform: 'uppercase',
+            }}>
+              {item.comp.category}
+            </span>
+            <button
+              onClick={copy}
+              title={copied ? 'Copied!' : 'Copy HTML'}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: 26, height: 26, borderRadius: 6, border: `1px solid ${copied ? '#BBF7D0' : BORDER}`,
+                background: copied ? '#F0FDF4' : '#fff', cursor: 'pointer',
+                color: copied ? '#16A34A' : TEXT2, transition: 'all .15s', flexShrink: 0,
+              }}
+            >
+              {copied ? (
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                  <polyline points="2,7 5.5,10.5 12,4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                  <rect x="5" y="1" width="8" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                  <path d="M3 4H2a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                </svg>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Desktop + Mobile panels side by side */}
@@ -472,18 +496,9 @@ function ComponentSection({ item, tokens, components, isExpanded, onToggleExpand
                 ))}
               </div>
             )}
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', paddingTop: 14, borderTop: `1px solid ${BORDER}` }}>
-              <button onClick={copy} style={{
-                padding: '8px 18px', background: copied ? '#14532D' : ACCENT,
-                border: 'none', borderRadius: 7, color: '#fff', fontFamily: FONT,
-                fontSize: 12, fontWeight: 600, cursor: 'pointer', transition: 'background .15s',
-              }}>
-                {copied ? '✓ Copied' : 'Copy HTML'}
-              </button>
-              <span style={{ color: TEXT3, fontFamily: FONT, fontSize: 11 }}>
-                Paste directly into Mozart or Liquid templates
-              </span>
-            </div>
+            <p style={{ color: TEXT3, fontFamily: FONT, fontSize: 11, margin: '14px 0 0', paddingTop: 14, borderTop: `1px solid ${BORDER}` }}>
+              Use the copy button above to grab the HTML for Mozart or Liquid templates.
+            </p>
           </div>
         )}
       </div>
@@ -506,6 +521,14 @@ export function SystemPage({ tokens, components, isAdmin, onNavigate, onReset }:
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((name: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(name);
+    toastTimer.current = setTimeout(() => setToast(null), 2500);
+  }, []);
 
   const searchRef = useRef<HTMLInputElement>(null);
   const mainRef   = useRef<HTMLDivElement>(null);
@@ -591,6 +614,7 @@ export function SystemPage({ tokens, components, isAdmin, onNavigate, onReset }:
   }, [allItems, grouped]);
 
   return (
+    <>
     <div style={{ display: 'flex', minHeight: '100vh', background: BG, fontFamily: FONT }}>
 
       {/* ── Sidebar ────────────────────────────────────────────── */}
@@ -806,6 +830,7 @@ export function SystemPage({ tokens, components, isAdmin, onNavigate, onReset }:
                       components={components}
                       isExpanded={expandedKey === item.key}
                       onToggleExpand={() => toggleExpand(item.key)}
+                      onCopy={showToast}
                     />
                   ))}
                 </div>
@@ -815,5 +840,35 @@ export function SystemPage({ tokens, components, isAdmin, onNavigate, onReset }:
         </div>
       </div>
     </div>
+
+    {/* ── Copy toast ── */}
+
+    <div style={{
+      position: 'fixed', bottom: 28, left: '50%', transform: `translateX(-50%) translateY(${toast ? '0' : '12px'})`,
+      opacity: toast ? 1 : 0, pointerEvents: 'none',
+      transition: 'opacity .2s, transform .2s',
+      zIndex: 9999,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        background: '#1A1A1A', borderRadius: 12,
+        padding: '10px 16px 10px 12px',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.28)',
+      }}>
+        <div style={{
+          width: 22, height: 22, borderRadius: 6, background: '#16A34A',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+        }}>
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+            <polyline points="2,7 5.5,10.5 12,4" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </div>
+        <span style={{ fontFamily: FONT, fontSize: 13, fontWeight: 500, color: '#fff', whiteSpace: 'nowrap' }}>
+          <span style={{ color: 'rgba(255,255,255,0.5)' }}>{toast}</span>
+          {' '}HTML copied — paste into Mozart
+        </span>
+      </div>
+    </div>
+    </>
   );
 }
